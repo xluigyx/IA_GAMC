@@ -1,302 +1,267 @@
 // src/components/ChatInputVoz.tsx
-// Componente de entrada por voz usando Web Speech API (CU-03, Paso 6)
-// Compatible con Chrome/Edge. Firefox requiere polyfill.
+// Micrófono robusto: primero pide permiso getUserMedia, luego inicia SpeechRecognition
 
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import './ChatInputVoz.css'
 
-// ── Tipos Web Speech API (no vienen en los tipos estándar de TS) ──────────────
-interface SpeechRecognitionEvent extends Event {
-  results: SpeechRecognitionResultList
-  resultIndex: number
-}
-
-interface SpeechRecognitionErrorEvent extends Event {
-  error: string
-  message: string
-}
-
-interface SpeechRecognitionInstance extends EventTarget {
-  lang: string
-  continuous: boolean
-  interimResults: boolean
-  maxAlternatives: number
-  start(): void
-  stop(): void
-  abort(): void
-  onstart: ((ev: Event) => void) | null
-  onend: ((ev: Event) => void) | null
-  onresult: ((ev: SpeechRecognitionEvent) => void) | null
-  onerror: ((ev: SpeechRecognitionErrorEvent) => void) | null
-  onspeechend: ((ev: Event) => void) | null
-}
-
-declare global {
-  interface Window {
-    SpeechRecognition: new () => SpeechRecognitionInstance
-    webkitSpeechRecognition: new () => SpeechRecognitionInstance
-  }
-}
-
-// ── Props del componente ───────────────────────────────────────────────────────
 interface ChatInputVozProps {
-  onTranscript: (text: string) => void  // Callback cuando hay texto finalizado
+  onTranscript: (text: string) => void
   disabled?: boolean
 }
 
-// ── Tipos de estado de grabación ──────────────────────────────────────────────
-type RecordingState = 'idle' | 'listening' | 'processing' | 'error'
+type MicState = 'idle' | 'requesting' | 'listening' | 'processing' | 'error' | 'unsupported'
 
-// ── Componente principal ───────────────────────────────────────────────────────
 export default function ChatInputVoz({ onTranscript, disabled = false }: ChatInputVozProps) {
-  const [recordingState, setRecordingState] = useState<RecordingState>('idle')
-  const [interimText, setInterimText]       = useState('')   // Texto en tiempo real
-  const [finalText, setFinalText]           = useState('')   // Texto confirmado
-  const [errorMessage, setErrorMessage]     = useState('')
-  const [isSupported, setIsSupported]       = useState(true)
-  const [volume, setVolume]                 = useState(0)    // Nivel de audio simulado
+  const [micState, setMicState]       = useState<MicState>('idle')
+  const [interim, setInterim]         = useState('')
+  const [errorMsg, setErrorMsg]       = useState('')
+  const [permGranted, setPermGranted] = useState<boolean | null>(null)
+  const [bars, setBars]               = useState([30, 50, 40, 60, 35])
 
-  const recognitionRef  = useRef<SpeechRecognitionInstance | null>(null)
-  const volumeTimerRef  = useRef<ReturnType<typeof setInterval> | null>(null)
-  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const recRef       = useRef<SpeechRecognition | null>(null)
+  const accumulated  = useRef('')
+  const interimRef   = useRef('')   // ref para evitar stale closure en onend
+  const silenceTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const barTimer     = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  // ── Verificar soporte del navegador al montar ─────────────────────────────
+  // ── Verificar soporte y estado de permiso al montar ──────────────────────
   useEffect(() => {
-    const SpeechRecognition =
-      window.SpeechRecognition || window.webkitSpeechRecognition
-    if (!SpeechRecognition) {
-      setIsSupported(false)
-      setErrorMessage('Tu navegador no soporta Web Speech API. Usa Chrome o Edge.')
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (!SR) { setMicState('unsupported'); return }
+
+    // Chequear si ya hay permiso concedido
+    if (navigator.permissions) {
+      navigator.permissions.query({ name: 'microphone' as PermissionName })
+        .then(result => {
+          setPermGranted(result.state === 'granted')
+          result.onchange = () => setPermGranted(result.state === 'granted')
+        })
+        .catch(() => {}) // Firefox no soporta esto
     }
+
     return () => {
-      if (volumeTimerRef.current) clearInterval(volumeTimerRef.current)
-      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current)
+      if (silenceTimer.current) clearTimeout(silenceTimer.current)
+      if (barTimer.current) clearInterval(barTimer.current)
     }
   }, [])
 
-  // ── Animación de volumen (simulada para feedback visual) ──────────────────
-  const startVolumeAnimation = () => {
-    volumeTimerRef.current = setInterval(() => {
-      setVolume(Math.random() * 100)
-    }, 150)
+  const animateBars = (on: boolean) => {
+    if (on) {
+      barTimer.current = setInterval(() =>
+        setBars(Array.from({ length: 5 }, () => 15 + Math.random() * 85)), 100)
+    } else {
+      if (barTimer.current) clearInterval(barTimer.current)
+      setBars([30, 50, 40, 60, 35])
+    }
   }
 
-  const stopVolumeAnimation = () => {
-    if (volumeTimerRef.current) {
-      clearInterval(volumeTimerRef.current)
-      volumeTimerRef.current = null
+  // ── PASO 1: Solicitar permiso explícito, luego iniciar reconocimiento ────────
+  const requestPermissionAndStart = async () => {
+    setErrorMsg('')
+    setMicState('requesting')
+    console.log('[VOZ] Paso 1: Solicitando permiso getUserMedia...')
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      console.log('[VOZ] ✅ Permiso concedido. Liberando stream...')
+      setPermGranted(true)
+      // Liberar el stream — Chrome necesita un momento para liberar el hardware
+      stream.getTracks().forEach(t => t.stop())
+
+      // ⚠️ Delay crítico: esperar que Chrome libere el micrófono antes de rec.start()
+      await new Promise(resolve => setTimeout(resolve, 350))
+      console.log('[VOZ] Paso 2: Iniciando SpeechRecognition...')
+      startSpeechRecognition()
+
+    } catch (err: unknown) {
+      console.error('[VOZ] Error getUserMedia:', err)
+      setPermGranted(false)
+      const name = (err as Error).name
+      if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+        setErrorMsg('PERMISO_DENEGADO')
+      } else if (name === 'NotFoundError') {
+        setErrorMsg('NO_MICROFONO')
+      } else {
+        setErrorMsg(`Error: ${(err as Error).message}`)
+      }
+      setMicState('error')
     }
-    setVolume(0)
   }
 
-  // ── Iniciar grabación ─────────────────────────────────────────────────────
-  const startRecording = useCallback(() => {
-    const SpeechRecognition =
-      window.SpeechRecognition || window.webkitSpeechRecognition
+  const startSpeechRecognition = () => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (!SR) { setMicState('unsupported'); return }
 
-    if (!SpeechRecognition) return
+    accumulated.current = ''
+    interimRef.current  = ''
+    setInterim('')
 
-    setErrorMessage('')
-    setInterimText('')
-    setFinalText('')
+    const rec = new SR()
+    recRef.current = rec
+    rec.lang = 'es-ES'          // es-BO no soportado por Chrome — usar es-ES
+    rec.continuous = true
+    rec.interimResults = true
+    rec.maxAlternatives = 1
 
-    const recognition = new SpeechRecognition()
-    recognitionRef.current = recognition
+    // Cambiar estado INMEDIATAMENTE (no esperar onstart)
+    setMicState('listening')
+    animateBars(true)
 
-    // Configuración para español boliviano
-    recognition.lang = 'es-BO'
-    recognition.continuous = true
-    recognition.interimResults = true
-    recognition.maxAlternatives = 3
-
-    recognition.onstart = () => {
-      setRecordingState('listening')
-      startVolumeAnimation()
-      console.log('[VOZ] Reconocimiento iniciado (es-BO)')
+    rec.onstart = () => {
+      console.log('[VOZ] ✅ rec.onstart — micrófono activo')
     }
 
-    recognition.onresult = (event: SpeechRecognitionEvent) => {
-      let interim = ''
-      let final = ''
-
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const transcript = event.results[i][0].transcript
-        if (event.results[i].isFinal) {
-          final += transcript + ' '
+    rec.onresult = (e: SpeechRecognitionEvent) => {
+      let interimChunk = ''
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const t = e.results[i][0].transcript
+        if (e.results[i].isFinal) {
+          accumulated.current += t + ' '
+          interimRef.current = ''
         } else {
-          interim += transcript
+          interimChunk += t
         }
       }
+      interimRef.current = interimChunk
+      setInterim(interimChunk)
 
-      if (interim) setInterimText(interim)
-      if (final) {
-        setFinalText(prev => prev + final)
-        setInterimText('')
+      if (silenceTimer.current) clearTimeout(silenceTimer.current)
+      silenceTimer.current = setTimeout(stopRecording, 2500)
+    }
+
+    rec.onerror = (e: SpeechRecognitionErrorEvent) => {
+      console.error('[VOZ] rec.onerror:', e.error, e.message)
+      animateBars(false)
+      if (e.error === 'aborted') { setMicState('idle'); return }
+      const msgs: Record<string, string> = {
+        'not-allowed': 'PERMISO_DENEGADO',
+        'no-speech':   'No se detectó voz. Habla más cerca del micrófono.',
+        'network':     'Chrome necesita internet para procesar la voz. Verifica tu conexión.',
+        'audio-capture': 'NO_MICROFONO',
       }
-
-      // Auto-detención tras 3 segundos de silencio
-      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current)
-      silenceTimerRef.current = setTimeout(() => {
-        stopRecording()
-      }, 3000)
+      setErrorMsg(msgs[e.error] ?? `Error: ${e.error}`)
+      setMicState('error')
     }
 
-    recognition.onspeechend = () => {
-      console.log('[VOZ] Fin de la voz detectado')
-    }
+    rec.onend = () => {
+      console.log('[VOZ] rec.onend — fin de grabación')
+      animateBars(false)
+      if (silenceTimer.current) clearTimeout(silenceTimer.current)
 
-    recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
-      console.error('[VOZ] Error:', event.error)
-      stopVolumeAnimation()
-
-      const errorMessages: Record<string, string> = {
-        'no-speech':         'No se detectó voz. Intenta hablar más cerca del micrófono.',
-        'audio-capture':     'No se puede acceder al micrófono. Verifica los permisos.',
-        'not-allowed':       'Acceso al micrófono denegado. Habilítalo en la configuración.',
-        'network':           'Error de red en el reconocimiento de voz.',
-        'aborted':           'Grabación cancelada.',
-        'service-not-allowed': 'Servicio de voz no disponible.',
+      // Usar refs en lugar de state para evitar stale closures
+      const texto = (accumulated.current + interimRef.current).trim()
+      if (texto) {
+        console.log(`[VOZ] ✅ Enviando al formulario: "${texto}"`)
+        onTranscript(texto)
+      } else {
+        console.log('[VOZ] ⚠️  Sin texto capturado')
       }
-
-      setErrorMessage(errorMessages[event.error] || `Error: ${event.error}`)
-      setRecordingState('error')
+      accumulated.current = ''
+      interimRef.current  = ''
+      setInterim('')
+      setMicState('idle')
     }
 
-    recognition.onend = () => {
-      stopVolumeAnimation()
-      setRecordingState('processing')
-
-      // Inyectar texto al formulario padre
-      setTimeout(() => {
-        const captured = (finalText + interimText).trim()
-        if (captured) {
-          onTranscript(captured)
-          console.log(`[VOZ] Texto inyectado al chat: "${captured}"`)
-        }
-        setRecordingState('idle')
-        setInterimText('')
-      }, 300)
-    }
-
-    recognition.start()
-  }, [finalText, interimText, onTranscript])
-
-  // ── Detener grabación ─────────────────────────────────────────────────────
-  const stopRecording = useCallback(() => {
-    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current)
-    if (recognitionRef.current) {
-      recognitionRef.current.stop()
-      recognitionRef.current = null
-    }
-  }, [])
-
-  // ── Usar texto capturado manualmente ─────────────────────────────────────
-  const handleUseText = () => {
-    const text = (finalText + interimText).trim()
-    if (text) {
-      onTranscript(text)
-      setFinalText('')
-      setInterimText('')
+    try {
+      rec.start()
+      console.log('[VOZ] rec.start() llamado')
+    } catch (err) {
+      console.error('[VOZ] Error en rec.start():', err)
+      setErrorMsg(`No se pudo iniciar el reconocimiento: ${(err as Error).message}`)
+      setMicState('error')
+      animateBars(false)
     }
   }
 
-  // ── Render ────────────────────────────────────────────────────────────────
-  if (!isSupported) {
-    return (
-      <div className="voz-unsupported" role="alert">
-        🎤 {errorMessage}
+  const stopRecording = () => {
+    if (silenceTimer.current) clearTimeout(silenceTimer.current)
+    recRef.current?.stop()
+    recRef.current = null
+  }
+
+  // ── Render: Sin soporte ───────────────────────────────────────────────────
+  if (micState === 'unsupported') return (
+    <div className="voz-box warn">
+      <span>⚠️</span>
+      <div>
+        <strong>Navegador no compatible</strong><br/>
+        <small>Usa <strong>Google Chrome</strong> o <strong>Microsoft Edge</strong> para el reconocimiento de voz.</small>
       </div>
-    )
-  }
+    </div>
+  )
 
-  const isListening   = recordingState === 'listening'
-  const isProcessing  = recordingState === 'processing'
-  const hasText       = !!(finalText || interimText)
+  const isListening  = micState === 'listening'
+  const isRequesting = micState === 'requesting'
+  const isProcessing = micState === 'processing'
+  const isBusy       = isListening || isRequesting || isProcessing
 
   return (
-    <div className="chat-input-voz" aria-label="Grabación de voz">
-      {/* Botón principal de grabación */}
+    <div className={`voz-container ${isListening ? 'listening' : ''}`}>
+      {/* Botón principal */}
       <button
         id="btn-grabar-voz"
         type="button"
-        onClick={isListening ? stopRecording : startRecording}
-        disabled={disabled || isProcessing}
-        className={`btn-voz ${isListening ? 'listening' : ''} ${isProcessing ? 'processing' : ''}`}
-        aria-label={isListening ? 'Detener grabación' : 'Iniciar grabación de voz'}
-        title={isListening ? 'Haz clic para detener' : 'Haz clic para hablar'}
+        onClick={isBusy ? stopRecording : requestPermissionAndStart}
+        disabled={disabled}
+        className={`btn-mic ${isListening ? 'recording' : ''} ${isRequesting ? 'requesting' : ''}`}
+        title={isListening ? 'Clic para detener' : 'Clic para hablar'}
       >
-        {/* Ondas de audio animadas */}
-        {isListening && (
-          <>
-            <span className="voz-wave" style={{ height: `${Math.max(20, volume * 0.4)}px` }} />
-            <span className="voz-wave" style={{ height: `${Math.max(20, volume * 0.6)}px` }} />
-            <span className="voz-wave" style={{ height: `${Math.max(20, volume * 0.5)}px` }} />
-          </>
-        )}
-
-        {/* Ícono */}
-        <span className="voz-icon">
-          {isListening   ? '⏹' :
-           isProcessing  ? '⏳' :
-                           '🎤'}
-        </span>
+        {isRequesting ? <span className="mic-spinner"/> :
+         isListening  ? <span className="mic-bars">{bars.map((h,i)=><b key={i} style={{height:`${h}%`}}/>)}</span> :
+         <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+           <path d="M12 1a4 4 0 0 1 4 4v7a4 4 0 0 1-8 0V5a4 4 0 0 1 4-4zm0 2a2 2 0 0 0-2 2v7a2 2 0 0 0 4 0V5a2 2 0 0 0-2-2zm-1 16.93V21h2v-1.07A8.002 8.002 0 0 0 20 12h-2a6 6 0 0 1-12 0H4a8.002 8.002 0 0 0 7 7.93z"/>
+         </svg>}
       </button>
 
-      {/* Estado y transcripción en vivo */}
-      <div className="voz-status-area">
+      {/* Área de estado */}
+      <div className="voz-status">
+        {micState === 'idle' && permGranted === false && (
+          <div className="voz-hint err-hint">🔒 Permiso denegado — ve abajo para solucionarlo</div>
+        )}
+        {micState === 'idle' && permGranted !== false && (
+          <div className="voz-hint">Clic en 🎤 · habla en español · se detiene solo al silenciar</div>
+        )}
+        {isRequesting && (
+          <div className="voz-hint" style={{color:'#fbbf24'}}>
+            ⏳ Solicitando permiso de micrófono... <strong>acepta el popup del navegador</strong>
+          </div>
+        )}
         {isListening && (
-          <div className="voz-live-indicator">
-            <span className="voz-live-dot" />
-            <span className="voz-live-label">Escuchando en español boliviano...</span>
+          <div className="voz-live">
+            <span className="live-dot"/>
+            Grabando... {interim && <em className="interim">"{interim}"</em>}
           </div>
         )}
 
-        {isProcessing && (
-          <div className="voz-processing">
-            <span className="voz-spinner" />
-            <span>Procesando audio...</span>
-          </div>
-        )}
-
-        {!isListening && !isProcessing && !hasText && recordingState === 'idle' && (
-          <p className="voz-hint">
-            Haz clic en el micrófono y habla sobre el problema que deseas reportar
-          </p>
-        )}
-
-        {/* Transcripción en tiempo real */}
-        {hasText && (
-          <div className="voz-transcript-box">
-            <span className="voz-transcript-label">Transcripción:</span>
-            <p className="voz-transcript-text">
-              {finalText}
-              {interimText && (
-                <span className="voz-interim">{interimText}</span>
-              )}
-            </p>
-            {!isListening && (
-              <button
-                id="btn-usar-transcripcion"
-                type="button"
-                onClick={handleUseText}
-                className="btn-usar-texto"
-              >
-                ✅ Usar este texto
-              </button>
+        {/* Errores con instrucciones específicas */}
+        {micState === 'error' && (
+          <div className="voz-error-block">
+            {errorMsg === 'PERMISO_DENEGADO' ? (
+              <div className="voz-fix-steps">
+                <strong>🔒 Permiso de micrófono denegado — soluciones:</strong>
+                <ol>
+                  <li>Haz clic en el <strong>candado 🔒</strong> o ícono 🎤 en la barra de dirección de Chrome</li>
+                  <li>Cambia <em>"Micrófono"</em> de <em>Bloqueado</em> → <em>Permitir</em></li>
+                  <li>Recarga la página (<kbd>F5</kbd>) y vuelve a intentar</li>
+                </ol>
+                <small style={{color:'#64748b'}}>
+                  URL directa: <code>chrome://settings/content/microphone</code> → agrega <code>localhost:5173</code>
+                </small>
+              </div>
+            ) : errorMsg === 'NO_MICROFONO' ? (
+              <div className="voz-fix-steps">
+                <strong>🎙️ No se detectó micrófono</strong>
+                <ol>
+                  <li>Verifica que el micrófono esté conectado</li>
+                  <li>Revisa el Administrador de dispositivos de Windows</li>
+                  <li>En Chrome: Configuración → Privacidad → Micrófono</li>
+                </ol>
+              </div>
+            ) : (
+              <div className="voz-err-simple">{errorMsg}</div>
             )}
-          </div>
-        )}
-
-        {/* Error */}
-        {recordingState === 'error' && errorMessage && (
-          <div className="voz-error" role="alert">
-            ⚠️ {errorMessage}
-            <button
-              type="button"
-              onClick={() => setRecordingState('idle')}
-              className="btn-dismiss-error"
-            >
-              ✕
+            <button type="button" onClick={() => setMicState('idle')} className="btn-retry">
+              Reintentar
             </button>
           </div>
         )}
