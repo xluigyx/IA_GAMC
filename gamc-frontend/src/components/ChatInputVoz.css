@@ -1,0 +1,233 @@
+/* ============================================================
+   ChatInputVoz.css — Estilos del componente de grabación de voz
+   ============================================================ */
+
+.chat-input-voz {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 16px;
+  background: rgba(15, 23, 42, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 14px;
+  margin-bottom: 4px;
+}
+
+/* ── Botón principal de grabación ──────────────────────────── */
+.btn-voz {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  width: 52px;
+  height: 52px;
+  min-width: 52px;
+  border-radius: 50%;
+  border: none;
+  background: linear-gradient(135deg, #1a3a6c, #2563eb);
+  cursor: pointer;
+  transition: all 0.3s ease;
+  box-shadow: 0 4px 15px rgba(37, 99, 235, 0.3);
+  overflow: hidden;
+}
+
+.btn-voz:hover:not(:disabled) {
+  transform: scale(1.08);
+  box-shadow: 0 6px 20px rgba(37, 99, 235, 0.5);
+}
+
+.btn-voz:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-voz.listening {
+  background: linear-gradient(135deg, #dc2626, #ef4444);
+  box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4);
+  animation: pulse-record 1.5s infinite;
+}
+
+.btn-voz.processing {
+  background: linear-gradient(135deg, #d97706, #f59e0b);
+}
+
+@keyframes pulse-record {
+  0%   { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.5); }
+  70%  { box-shadow: 0 0 0 12px rgba(239, 68, 68, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+}
+
+/* ── Ondas de volumen ──────────────────────────────────────── */
+.voz-wave {
+  display: block;
+  width: 3px;
+  min-height: 8px;
+  background: rgba(255, 255, 255, 0.9);
+  border-radius: 2px;
+  transition: height 0.15s ease;
+  animation: wave-bounce 0.6s ease-in-out infinite alternate;
+}
+
+.voz-wave:nth-child(2) { animation-delay: 0.15s; }
+.voz-wave:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes wave-bounce {
+  from { transform: scaleY(0.5); }
+  to   { transform: scaleY(1.3); }
+}
+
+.voz-icon {
+  font-size: 1.3rem;
+  line-height: 1;
+  position: relative;
+  z-index: 1;
+}
+
+/* ── Área de estado y transcripción ────────────────────────── */
+.voz-status-area {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Indicador LIVE */
+.voz-live-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.voz-live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ef4444;
+  animation: pulse-dot 1s infinite;
+  flex-shrink: 0;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.5; transform: scale(0.8); }
+}
+
+.voz-live-label {
+  font-size: 0.8rem;
+  color: #fca5a5;
+  font-weight: 500;
+}
+
+/* Processing */
+.voz-processing {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8rem;
+  color: #fbbf24;
+}
+
+.voz-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(251, 191, 36, 0.3);
+  border-top-color: #fbbf24;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Hint */
+.voz-hint {
+  font-size: 0.8rem;
+  color: #64748b;
+  line-height: 1.5;
+  font-style: italic;
+}
+
+/* ── Cuadro de transcripción ───────────────────────────────── */
+.voz-transcript-box {
+  background: rgba(37, 99, 235, 0.08);
+  border: 1px solid rgba(37, 99, 235, 0.2);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+
+.voz-transcript-label {
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: #93c5fd;
+  margin-bottom: 6px;
+}
+
+.voz-transcript-text {
+  font-size: 0.9rem;
+  color: #e2e8f0;
+  line-height: 1.6;
+  word-break: break-word;
+  margin-bottom: 10px;
+}
+
+/* Texto provisional en tiempo real (diferenciado visualmente) */
+.voz-interim {
+  color: #94a3b8;
+  font-style: italic;
+}
+
+.btn-usar-texto {
+  background: rgba(16, 185, 129, 0.15);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  color: #10b981;
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-family: inherit;
+}
+
+.btn-usar-texto:hover {
+  background: rgba(16, 185, 129, 0.25);
+  border-color: rgba(16, 185, 129, 0.5);
+  transform: translateY(-1px);
+}
+
+/* ── Error ─────────────────────────────────────────────────── */
+.voz-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 0.8rem;
+  color: #fca5a5;
+}
+
+.btn-dismiss-error {
+  background: none;
+  border: none;
+  color: #fca5a5;
+  cursor: pointer;
+  font-size: 0.9rem;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+/* ── Sin soporte ───────────────────────────────────────────── */
+.voz-unsupported {
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  border-radius: 10px;
+  padding: 12px 16px;
+  font-size: 0.85rem;
+  color: #fcd34d;
+}
