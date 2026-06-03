@@ -1,0 +1,140 @@
+// prisma/schema.prisma
+// Esquema relacional PostgreSQL para el sistema GAMC
+// Modelos: User, Complaint, ComplaintImage, ComplaintHistory
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// MODELO DE USUARIO (Ciudadano o Funcionario Municipal)
+// ============================================================
+model User {
+  id            String      @id @default(cuid())
+  email         String      @unique
+  password      String      // Hash bcrypt
+  fullName      String
+  phone         String?
+  role          UserRole    @default(CIUDADANO)
+  isActive      Boolean     @default(true)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  // Relaciones
+  complaints    Complaint[]
+
+  @@map("users")
+}
+
+enum UserRole {
+  CIUDADANO
+  OPERADOR
+  SUPERVISOR
+  ADMIN
+}
+
+// ============================================================
+// MODELO DE DENUNCIA CIUDADANA (Ticket Oficial)
+// ============================================================
+model Complaint {
+  id                String            @id @default(cuid())
+  ticketCode        String            @unique // Ej: GAMC-2026-00001
+  
+  // Clasificación IA (RF-04)
+  category          String            // ALUMBRADO_PUBLICO, BACHEO_Y_VIAS, etc.
+  subcategory       String
+  priority          Priority          @default(MEDIA)
+  aiConfidence      Float             @default(0.0) // Confianza del modelo Ollama (0.0 - 1.0)
+  requiresVerification Boolean        @default(false)
+  
+  // Descripción
+  rawDescription    String            // Texto original del ciudadano
+  cleanSummary      String            // Resumen procesado por IA
+  keywords          String[]          // Palabras clave extraídas
+  
+  // Geolocalización (RF-3.1)
+  address           String
+  latitude          Float?
+  longitude         Float?
+  district          String?           // Distrito municipal de Cochabamba
+  
+  // Estado del ticket
+  status            ComplaintStatus   @default(RECIBIDA)
+  assignedTo        String?           // ID del operador asignado
+  
+  // Auditoría
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+  resolvedAt        DateTime?
+  
+  // Relaciones
+  userId            String
+  user              User              @relation(fields: [userId], references: [id])
+  images            ComplaintImage[]
+  history           ComplaintHistory[]
+
+  @@map("complaints")
+  @@index([category, status])
+  @@index([createdAt])
+  @@index([ticketCode])
+}
+
+enum Priority {
+  CRITICA
+  ALTA
+  MEDIA
+  BAJA
+}
+
+enum ComplaintStatus {
+  RECIBIDA
+  EN_REVISION
+  ASIGNADA
+  EN_PROCESO
+  RESUELTA
+  RECHAZADA
+  CERRADA
+}
+
+// ============================================================
+// IMÁGENES ADJUNTAS A LA DENUNCIA (RF-3.3)
+// ============================================================
+model ComplaintImage {
+  id          String    @id @default(cuid())
+  url         String    // URL en almacenamiento local o S3
+  filename    String
+  mimeType    String
+  sizeBytes   Int
+  uploadedAt  DateTime  @default(now())
+  
+  // Relación
+  complaintId String
+  complaint   Complaint @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+
+  @@map("complaint_images")
+}
+
+// ============================================================
+// HISTORIAL DE CAMBIOS DE ESTADO (Trazabilidad RF-6.1)
+// ============================================================
+model ComplaintHistory {
+  id            String          @id @default(cuid())
+  previousStatus ComplaintStatus?
+  newStatus     ComplaintStatus
+  changedBy     String          // ID del usuario que realizó el cambio
+  changedByRole UserRole
+  notes         String?         // Comentario del operador
+  timestamp     DateTime        @default(now())
+  
+  // Relación
+  complaintId   String
+  complaint     Complaint       @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+
+  @@map("complaint_history")
+  @@index([complaintId, timestamp])
+}
