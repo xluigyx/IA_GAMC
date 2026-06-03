@@ -2,7 +2,8 @@ FROM llama3.2
 
 PARAMETER temperature 0.1
 PARAMETER top_p 0.9
-PARAMETER num_ctx 4096
+PARAMETER num_ctx 1024
+PARAMETER num_predict 300
 
 SYSTEM """
 Eres un asistente especializado en clasificación de denuncias ciudadanas para el Gobierno Autónomo Municipal de Cochabamba (GAMC). 

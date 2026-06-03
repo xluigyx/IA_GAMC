@@ -43,6 +43,42 @@ const ollamaClient = new Ollama({
   host: process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
 });
 
+// ── Caché en memoria para clasificaciones repetidas (RNF-06: latencia) ────────
+// Evita llamar a Ollama si el mismo texto ya fue clasificado recientemente
+import { createHash } from 'crypto';
+
+interface CacheEntry {
+  result: OllamaClassificationResult;
+  rawResponse: string;
+  latencyMs: number;
+  expiresAt: number;
+}
+const classificationCache = new Map<string, CacheEntry>();
+const CACHE_TTL_MS  = 60 * 60 * 1000; // 1 hora
+const CACHE_MAX_SIZE = 200;
+
+function getCacheKey(text: string): string {
+  // Normalizar: minúsculas, sin puntuación extra — textos similares = mismo key
+  const normalized = text.toLowerCase().trim().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ');
+  return createHash('md5').update(normalized).digest('hex');
+}
+
+function getFromCache(key: string): CacheEntry | null {
+  const entry = classificationCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) { classificationCache.delete(key); return null; }
+  return entry;
+}
+
+function setToCache(key: string, value: Omit<CacheEntry, 'expiresAt'>): void {
+  if (classificationCache.size >= CACHE_MAX_SIZE) {
+    // Eliminar la entrada más antigua
+    classificationCache.delete(classificationCache.keys().next().value);
+  }
+  classificationCache.set(key, { ...value, expiresAt: Date.now() + CACHE_TTL_MS });
+}
+
+
 // ============================================================
 // ESQUEMA DE VALIDACIÓN FLEXIBLE (Zod - OWASP Top 10 A03)
 // Acepta formato curl de prueba Y formato frontend React
@@ -137,7 +173,17 @@ async function resolveUser(
 // ============================================================
 async function classifyWithOllama(
   textRaw: string
-): Promise<{ result: OllamaClassificationResult; rawResponse: string; latencyMs: number }> {
+): Promise<{ result: OllamaClassificationResult; rawResponse: string; latencyMs: number; fromCache?: boolean }> {
+
+  // ── 1. Verificar caché primero (respuesta instantánea) ────────────────────
+  const cacheKey   = getCacheKey(textRaw);
+  const cachedHit  = getFromCache(cacheKey);
+  if (cachedHit) {
+    console.log(`[CACHE HIT] Clasificación desde caché (~0ms) key:${cacheKey.substring(0,8)}`);
+    return { ...cachedHit, fromCache: true };
+  }
+
+  // ── 2. Llamar a Ollama si no está en caché ────────────────────────────────
   const startTime = Date.now();
 
   const response = await ollamaClient.chat({
@@ -162,14 +208,36 @@ async function classifyWithOllama(
     );
   }
 
-  const result: OllamaClassificationResult = JSON.parse(jsonMatch[0]);
+  const raw = JSON.parse(jsonMatch[0]);
+
+  // ── Normalización tolerante de campos ────────────────────────────────────
+  const result: OllamaClassificationResult = {
+    categoria:             raw.categoria             || raw.category          || 'SIN_CLASIFICAR',
+    subcategoria:          raw.subcategoria          || raw.subcategory       || 'REVISION_MANUAL_REQUERIDA',
+    prioridad:             raw.prioridad             || raw.priority          || 'MEDIA',
+    resumen_limpio:        raw.resumen_limpio        || raw.resumen           || raw.summary || textRaw.substring(0, 150),
+    palabras_clave:        raw.palabras_clave        || raw.keywords          || [],
+    requiere_verificacion: raw.requiere_verificacion ?? raw.requiresVerification ?? false,
+    confianza: (() => {
+      const raw_conf = raw.confianza ?? raw.confidence ?? raw.confidence_score ?? raw.score ?? null;
+      if (raw_conf === null) return 0.85;
+      const n = Number(raw_conf);
+      if (isNaN(n)) return 0.85;
+      return n > 1 ? n / 100 : n;
+    })(),
+  };
 
   if (!result.categoria || !result.subcategoria || !result.prioridad) {
     throw new Error('El JSON de clasificación IA está incompleto.');
   }
 
-  return { result, rawResponse, latencyMs };
+  // ── 3. Guardar en caché para próximas peticiones ──────────────────────────
+  setToCache(cacheKey, { result, rawResponse, latencyMs });
+  console.log(`[OLLAMA] Clasificación completada en ${latencyMs}ms → guardada en caché`);
+
+  return { result, rawResponse, latencyMs, fromCache: false };
 }
+
 
 // ============================================================
 // FUNCIÓN: GENERADOR DE CÓDIGO DE TICKET ÚNICO CORRELATIVO
