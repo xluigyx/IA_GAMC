@@ -127,6 +127,79 @@ interface OllamaClassificationResult {
 }
 
 // ============================================================
+// CATÁLOGO OFICIAL GAMC (fuente de verdad para validación)
+// Debe coincidir con el SYSTEM prompt del Modelfile.
+// ============================================================
+const CATALOGO: Record<string, string[]> = {
+  ALUMBRADO_PUBLICO:        ['LAMPARA_APAGADA', 'POSTE_DANADO', 'CABLE_EXPUESTO', 'LUMINARIA_PARPADEANTE', 'ZONA_SIN_ALUMBRADO'],
+  BACHEO_Y_VIAS:            ['BACHE_PROFUNDO', 'GRIETA_EN_ASFALTO', 'HUNDIMIENTO_DE_VIA', 'DESPRENDIMIENTO_DE_CARPETA', 'VIA_SIN_SENALIZACION'],
+  AGUA_Y_ALCANTARILLADO:    ['FUGA_DE_AGUA', 'TUBERIA_ROTA', 'ALCANTARILLA_COLAPSADA', 'INUNDACION_POR_DRENAJE', 'AGUA_CONTAMINADA'],
+  RESIDUOS_SOLIDOS:         ['BASURA_EN_VIA_PUBLICA', 'CONTENEDOR_DESBORDADO', 'RECOJO_NO_REALIZADO', 'ESCOMBROS_ABANDONADOS', 'QUEMA_DE_BASURA'],
+  AREAS_VERDES_Y_PARQUES:   ['ARBOL_CAIDO', 'PODA_NECESARIA', 'PARQUE_DANADO', 'RIEGO_DEFICIENTE', 'JUEGOS_INFANTILES_ROTOS'],
+  TRANSPORTE_Y_MOVILIDAD:   ['SEMAFORO_DANADO', 'SENAL_VIAL_CAIDA', 'PARADERO_DETERIORADO', 'PASO_PEATONAL_BORRADO', 'OBSTRUCCION_VIAL'],
+  MERCADOS_Y_COMERCIO:      ['COMERCIO_INFORMAL_INVASIVO', 'MERCADO_INSALUBRE', 'BLOQUEO_DE_ACCESO', 'RUIDO_COMERCIAL', 'RESIDUOS_MERCADO'],
+  CONSTRUCCION_Y_URBANISMO: ['CONSTRUCCION_ILEGAL', 'OCUPACION_DE_ACERA', 'OBRA_SIN_SENALIZACION', 'DEMOLICION_NO_AUTORIZADA', 'MURO_EN_MAL_ESTADO'],
+  SEGURIDAD_CIUDADANA:      ['ZONA_PELIGROSA', 'INFRAESTRUCTURA_VANDALISADA', 'ESPACIO_OSCURO_INSEGURO', 'ACTIVIDAD_SOSPECHOSA', 'RAYADO_DE_MUROS'],
+  MEDIO_AMBIENTE:           ['CONTAMINACION_SONORA', 'CONTAMINACION_VISUAL', 'QUEMA_NO_AUTORIZADA', 'VERTIDO_ILEGAL', 'TALA_DE_ARBOLES'],
+  NO_MUNICIPAL:             ['DERIVAR_A_ENTIDAD_COMPETENTE'],
+};
+const CATEGORIAS_VALIDAS = Object.keys(CATALOGO);
+const PRIORIDADES_VALIDAS = ['CRITICA', 'ALTA', 'MEDIA', 'BAJA'];
+
+// ── Esquema JSON forzado (structured output) — el modelo NO puede salirse ─────
+// Garantiza JSON válido y categoría/prioridad dentro del catálogo oficial.
+const GAMC_JSON_SCHEMA = {
+  type: 'object',
+  properties: {
+    categoria:             { type: 'string', enum: CATEGORIAS_VALIDAS },
+    subcategoria:          { type: 'string' },
+    prioridad:             { type: 'string', enum: PRIORIDADES_VALIDAS },
+    confianza:             { type: 'number' },
+    resumen_limpio:        { type: 'string' },
+    palabras_clave:        { type: 'array', items: { type: 'string' } },
+    requiere_verificacion: { type: 'boolean' },
+  },
+  required: ['categoria', 'subcategoria', 'prioridad', 'confianza', 'resumen_limpio', 'palabras_clave', 'requiere_verificacion'],
+};
+
+// ============================================================
+// CAPA DE SEGURIDAD: valida y normaliza la salida del modelo
+// contra el catálogo oficial (defensa frente a alucinaciones).
+// ============================================================
+function validarContraCatalogo(r: OllamaClassificationResult): OllamaClassificationResult {
+  let { categoria, subcategoria, prioridad, confianza, requiere_verificacion } = r;
+
+  // 0. Normalizar artefactos de la salida estructurada (espacios sueltos, minúsculas)
+  //    Ej: "ALCAN TARILLA_COLAPSADA" → "ALCANTARILLA_COLAPSADA"
+  const norm = (s: string) => (s || '').toUpperCase().replace(/\s+/g, '');
+  categoria = norm(categoria);
+  subcategoria = norm(subcategoria);
+  prioridad = norm(prioridad) as OllamaClassificationResult['prioridad'];
+
+  // 1. Categoría debe existir en el catálogo
+  if (!CATEGORIAS_VALIDAS.includes(categoria)) {
+    console.warn(`[VALIDACION] Categoría inválida "${categoria}" → SIN_CLASIFICAR`);
+    categoria = 'SIN_CLASIFICAR';
+    subcategoria = 'REVISION_MANUAL_REQUERIDA';
+    requiere_verificacion = true;
+    confianza = Math.min(confianza, 0.5);
+  } else if (!CATALOGO[categoria].includes(subcategoria)) {
+    // 2. Subcategoría debe pertenecer a la categoría; si no, marcar verificación
+    console.warn(`[VALIDACION] Subcategoría "${subcategoria}" no pertenece a ${categoria} → revisión`);
+    subcategoria = CATALOGO[categoria][0]; // fallback a la primera válida
+    requiere_verificacion = true;
+  }
+
+  // 3. Prioridad válida (default MEDIA)
+  if (!PRIORIDADES_VALIDAS.includes(prioridad)) prioridad = 'MEDIA';
+
+  // 4. Confianza acotada a [0, 1]
+  confianza = Math.max(0, Math.min(1, confianza));
+
+  return { ...r, categoria, subcategoria, prioridad, confianza, requiere_verificacion };
+}
+
+// ============================================================
 // FUNCIÓN: RESOLUCIÓN DE USUARIO (Anónimo / Sesión / Registrado)
 // ============================================================
 async function resolveUser(
@@ -194,6 +267,8 @@ async function classifyWithOllama(
         content: `Analiza esta denuncia ciudadana del GAMC y devuelve SOLO el JSON de clasificación:\n\n"${textRaw}"`,
       },
     ],
+    // Salida estructurada: fuerza JSON válido con categoría/prioridad del catálogo
+    format: GAMC_JSON_SCHEMA,
     options: { temperature: 0.1 },
   });
 
@@ -231,11 +306,14 @@ async function classifyWithOllama(
     throw new Error('El JSON de clasificación IA está incompleto.');
   }
 
+  // ── 2b. Capa de seguridad: validar contra el catálogo oficial ─────────────
+  const validated = validarContraCatalogo(result);
+
   // ── 3. Guardar en caché para próximas peticiones ──────────────────────────
-  setToCache(cacheKey, { result, rawResponse, latencyMs });
+  setToCache(cacheKey, { result: validated, rawResponse, latencyMs });
   console.log(`[OLLAMA] Clasificación completada en ${latencyMs}ms → guardada en caché`);
 
-  return { result, rawResponse, latencyMs, fromCache: false };
+  return { result: validated, rawResponse, latencyMs, fromCache: false };
 }
 
 

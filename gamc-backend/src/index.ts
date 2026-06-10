@@ -8,11 +8,13 @@ import dotenv from 'dotenv';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { PrismaClient } from '@prisma/client';
+import multer from 'multer';
 import {
   createComplaint,
   getComplaintById,
   listComplaints,
 } from './controllers/ComplaintController';
+import { transcribeVoice } from './controllers/VoiceController';
 
 dotenv.config();
 
@@ -56,6 +58,16 @@ app.get('/health', (req, res) => {
     environment: process.env.NODE_ENV || 'development',
   });
 });
+
+// ── Reconocimiento de voz LOCAL (Whisper) — audio en memoria, máx 25MB ───────
+const audioUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 },
+});
+
+// RF-VOZ: Transcripción de denuncias habladas (Speech-to-Text offline)
+// El navegador graba el audio y lo manda aquí → Whisper local → texto.
+app.post('/api/v1/voice/transcribe', audioUpload.single('audio'), transcribeVoice);
 
 // CU-04: Pipeline de control e inferencia de denuncias
 app.post('/api/v1/complaints', createComplaint);
